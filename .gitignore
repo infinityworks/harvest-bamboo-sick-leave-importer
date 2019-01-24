@@ -1,0 +1,6 @@
+
+venv/bin/activate
+bamboo/__pycache__/set_to_bamboo.cpython-37.pyc
+bamboo/__pycache__/pull_from_bamboo.cpython-37.pyc
+*.pyc
+.DS_Store
