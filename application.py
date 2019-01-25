@@ -4,6 +4,8 @@ from bamboo.set_to_bamboo import SetToBamboo
 import logging
 import datetime
 from dateutil.relativedelta import *
+from datetime import date, timedelta
+import numpy as np
 
 logger = logging.getLogger()
 
@@ -21,42 +23,54 @@ class Compare:
     def gather_bamboo_time_off_by_email(self, email, start_date, end_date):
         return self.pull_from_bamboo.pull_sick_leave_for_employee_from_bamboo_by_email(email, start_date, end_date)
 
+    def harvest_dates_json_to_list(self, harvest_sick_dates):
+        harvest_dates = []
+        for date in harvest_sick_dates:
+            harvest_dates.append(date['spent_date'])
+
+        return harvest_dates
+
     def compare_data(self, harvest_sick_dates, start_date, end_date):
         unsuccessful_bamboo_put_requests = 0
         # Run through 1 employee at a time by their email
         for harvest_sick_email in harvest_sick_dates['users'].keys():
             # Get the days they have already booked off in Bamboo inbetween the dates we are setting for
-            existing_days_in_bamboo = self.gather_bamboo_time_off_by_email(harvest_sick_email, start_date, end_date)
-            if existing_days_in_bamboo != False:
-                # If they have no days sick in Bamboo between these date then set the data straight away
-                if existing_days_in_bamboo == True:
-                    set_success = self.set_sick_days_to_bamboo(harvest_sick_email, harvest_sick_dates['users'][harvest_sick_email])
-                    if not set_success:
-                        return False
-                else:
-                    temp_sick_days = []
-                    # Set the users sick days which aren't in Bamboo to the temp_sick_days array
-                    for harvest_sick_day in harvest_sick_dates['users'][harvest_sick_email]:
-                        for dates in existing_days_in_bamboo:
-                            set_to_list = True
-                            if harvest_sick_day['spent_date'] >= dates[0] and harvest_sick_day['spent_date'] <= dates[0]:
-                                set_to_list = False
-                                break
-                        if set_to_list:
-                            temp_sick_days.append(harvest_sick_day)
+            find_dates_in_bamboo_success, dates_booked_off_in_bamboo = self.gather_bamboo_time_off_by_email(harvest_sick_email, start_date, end_date)
+            if not find_dates_in_bamboo_success:
+                # TODO: Slack the employee email for manual entry
+                print("Fail")
 
-                    # Once the list is complete, set the sick days to Bamboo
-                    set_success = self.set_sick_days_to_bamboo(harvest_sick_email, temp_sick_days)
-                    if not set_success:
-                        # TODO: Send message to Slack on fail - Manually sort or rerun
-                        unsuccessful_bamboo_put_requests += 1
-                        # If there has been too many errors then the script will stop. This is to stop spamming Slack
-                        if unsuccessful_bamboo_put_requests > 10:
-                            logger.critical("Stopping the script. Too many put requests to Bamboo has failed.")
-                            return False
+            harvest_dates = self.harvest_dates_json_to_list(harvest_sick_dates['users'][harvest_sick_email])
+            print(harvest_sick_email)
+            print("-- Harvest Dates --")
+            print(harvest_dates)
+
+            if len(dates_booked_off_in_bamboo) != 0:
+                # dates_to_set_in_bamboo = list(set(dates_booked_off_in_bamboo) in set(harvest_dates))
+                dates_to_set_in_bamboo = np.setdiff1d(harvest_dates,dates_booked_off_in_bamboo)
             else:
-                print("Unsuccessful call")
+                dates_to_set_in_bamboo = harvest_dates
+
+            print("-- Dates booked off in Bamboo --")
+            print(dates_booked_off_in_bamboo)
+
+            print("-- Dates to set in Bamboo --")
+            print(dates_to_set_in_bamboo)
+
+            set_to_bamboo_success = self.set_sick_days_to_bamboo(harvest_sick_email, dates_to_set_in_bamboo)
+            if not set_to_bamboo_success:
+                print("Couldn't set")
                 # TODO: Send to Slack which employee it couldn't pull Bamboo Records for
+
+    def generate_xml_for_time_off_history(self, date, time_off_request_id, event_type, notes):
+        generated_xml = f'''<history>
+    <date>{date}</date>
+    <eventType>{event_type}</eventType>
+    <timeOffRequestId>{time_off_request_id}</timeOffRequestId>
+    <note>{notes}</note>
+    </history>
+        '''
+        return generated_xml
 
     def set_sick_days_to_bamboo(self, harvest_sick_email, set_dates):
         print("Setting data: " + str(set_dates))
@@ -67,18 +81,16 @@ class Compare:
                 logger.error("Could not find the employee ID within set_sick_days_to_bamboo")
                 return False
 
-            # Work out whether to book a full day or half day of sick to Bamboo.
-            if date['hours'] <= 4:
-                days_spent = 0.5
-            else:
-                days_spent = 1
-            print("--- Setting Into Bamboo ---")
-            print(employee_id)
-            print(date['spent_date'])
-            print(days_spent)
-            set_success = self.set_to_bamboo.time_off_request(employee_id, "approved", date['spent_date'], date['spent_date'], 13, days_spent)
+            set_success, request_response = self.set_to_bamboo.time_off_request(employee_id, "approved", date, date, 13, 1)
             if not set_success:
-                print("No Success")
+                logger.error(f"Could not set {harvest_sick_email} to Bamboo for the following dates: {set_dates} in request")
+                # TODO: Message Slack if unsuccessful for somone to manually sort
+
+            time_off_id = request_response['id']
+            xml_payload = self.generate_xml_for_time_off_history(date, time_off_id, "used", "Automated from Harvest")
+            set_success = self.set_to_bamboo.time_off_history(employee_id, xml_payload)
+            if not set_success:
+                logger.error(f"Could not set {harvest_sick_email} to Bamboo for the following dates: {set_dates} in history")
                 # TODO: Message Slack if unsuccessful for somone to manually sort
 
         return True
@@ -101,8 +113,32 @@ class Compare:
             # TODO: Send Slack message saying the script has being aborted due to too many errors occurring
             exit(1)
 
+def testing_comparing_dates_arrays():
+
+    bamboo_matching_dates = []
+    harvest_dates = ['2018-10-31', '2018-11-03']
+
+    bamboo_start_date = date('2018-10-31')  # start date
+    bamboo_end_date = date('2018-11-31')  # end date
+
+    delta = bamboo_end_date - bamboo_start_date  # timedelta
+
+    for i in range(delta.days + 1):
+        bamboo_matching_dates.append(str(bamboo_start_date + timedelta(i)))
+        print(str(bamboo_start_date + timedelta(i)))
+
+    matches = set(bamboo_matching_dates) - set(harvest_dates)
+
+
+
+
+
+
+
+
 
 
 if __name__ == '__main__':
     comp = Compare()
     comp.run_all()
+    # testing_comparing_dates_arrays()

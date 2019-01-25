@@ -54,7 +54,7 @@ class Harvest:
                 return False
 
             for timeoff in response['time_entries']:
-                if timeoff['task']['id'] == 11362306: # Sick leave project code
+                if timeoff['task']['id'] == 11362306 and timeoff['is_locked'] == True: # Sick leave project code and locked
                     # Add the sick leave to the harvest_data JSON for returning
                     try:
                         harvest_data['users'][str(timeoff['user']['id'])].append({
